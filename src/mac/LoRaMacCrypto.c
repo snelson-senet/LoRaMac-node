@@ -1021,7 +1021,8 @@ LoRaMacCryptoStatus_t LoRaMacCryptoPrepareJoinRequest( LoRaMacMessageJoinRequest
     LoRaMacCryptoStatus_t retval = LORAMAC_CRYPTO_ERROR;
 
     // Add device nonce
-    CryptoCtx.NvmCtx->DevNonce++;
+    // CryptoCtx.NvmCtx->DevNonce++;
+    CryptoCtx.NvmCtx->DevNonce = randr(0,0xFFFF);
     CryptoCtx.EventCryptoNvmCtxChanged( );
     macMsg->DevNonce = CryptoCtx.NvmCtx->DevNonce;
 

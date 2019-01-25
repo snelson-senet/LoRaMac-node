@@ -33,6 +33,7 @@
 #include "LoRaMac.h"
 #include "Commissioning.h"
 #include "NvmCtxMgmt.h"
+#include "systime.h"
 
 #ifndef ACTIVE_REGION
 
@@ -45,7 +46,7 @@
 /*!
  * Defines the application data transmission duty cycle. 5s, value in [ms].
  */
-#define APP_TX_DUTYCYCLE                            5000
+#define APP_TX_DUTYCYCLE                            60000
 
 /*!
  * Defines a random delay for application data transmission duty cycle. 1s,
@@ -86,7 +87,7 @@
 /*!
  * LoRaWAN application port
  */
-#define LORAWAN_APP_PORT                            2
+#define LORAWAN_APP_PORT                            1
 
 static uint8_t DevEui[] = LORAWAN_DEVICE_EUI;
 static uint8_t JoinEui[] = LORAWAN_JOIN_EUI;
@@ -161,7 +162,7 @@ static TimerEvent_t Led2Timer;
 /*!
  * Indicates if a new packet can be sent
  */
-static bool NextTx = true;
+static bool NextTx = false;
 
 /*!
  * Indicates if LoRaMacProcess call is pending.
@@ -289,6 +290,44 @@ const char* EventInfoStatusStrings[] =
     "Beacon not found"               // LORAMAC_EVENT_INFO_STATUS_BEACON_NOT_FOUND
 };
 
+#define DOWNLINK_RX_SLOT_TYPES   5
+#define DOWNLINK_PERIOD_SECONDS  60
+#define DOWNLINK_HISTORY_SAMPLES 15
+#define DOWNLINK_COUNTER_HISTORY_SIZE 25 
+#define DOWNLINK_TIMEOUT_SECONDS 60
+
+typedef struct DownLinkHistory_s{
+    uint32_t     downlinks;
+    uint8_t      currentByType[DOWNLINK_RX_SLOT_TYPES];
+    uint16_t     totalByType[DOWNLINK_RX_SLOT_TYPES];
+    uint16_t     downLinkCounter[DOWNLINK_COUNTER_HISTORY_SIZE];
+    uint8_t      previous[DOWNLINK_HISTORY_SAMPLES][DOWNLINK_RX_SLOT_TYPES];
+    uint32_t     endTime[DOWNLINK_HISTORY_SAMPLES];
+    uint16_t     intervalIx;
+    uint16_t     intervalSecs;
+    uint32_t     intervals;
+    TimerEvent_t timer;
+    TimerEvent_t timeoutTimer;
+    bool         timerExpired;  // Interval expired
+    bool         timeout;       // Rx timeout 
+} DownLinkHistory_t;
+
+DownLinkHistory_t DownLinkHistory = 
+{
+    .downlinks     = 0,
+    .currentByType = {0},
+    .totalByType   = {0},
+    .previous      = {{0}},
+    .intervalIx    = 0,
+    .intervalSecs  = DOWNLINK_PERIOD_SECONDS,
+    .endTime       = {0},
+    .timerExpired  = false,
+    .intervals     = 0,
+    .timeout       = false
+};
+
+const char *slotStrings[] = { "RX1", "RX2", "CLASS-C", "PING-SLOT", "MCAST-PING-SLOT" };
+
 /*!
  * Prints the provided buffer in HEX
  * 
@@ -345,13 +384,55 @@ static void JoinNetwork( void )
     }
 }
 
+void PrepareDownlinkStatusFrame()
+{
+    uint8_t dataSize = 0;
+
+     uint16_t downlinks = DownLinkHistory.downlinks;
+
+     // Total downlinks 
+     AppDataBuffer[dataSize++] = downlinks & 0xff;
+     AppDataBuffer[dataSize++] = (downlinks >> 8) & 0xff;
+
+
+     // Last DownLinkCounters
+    uint8_t count = DOWNLINK_COUNTER_HISTORY_SIZE;
+    if( DownLinkHistory.downlinks < DOWNLINK_COUNTER_HISTORY_SIZE )
+        count = DownLinkHistory.downlinks;
+
+
+    // Get the max applicative payload size
+    LoRaMacTxInfo_t txInfo;
+    LoRaMacQueryTxPossible( dataSize, &txInfo );
+
+    uint8_t ix = DownLinkHistory.downlinks % DOWNLINK_COUNTER_HISTORY_SIZE;
+    for(uint8_t i=0; i < count; i++)
+    {
+        if( ( dataSize  + 2 ) > txInfo.MaxPossibleApplicationDataSize) 
+           break; 
+
+        if( ix ==  0 ) 
+            ix = DOWNLINK_COUNTER_HISTORY_SIZE;
+        ix--; 
+            
+        uint16_t dfcnt = DownLinkHistory.downLinkCounter[ix];
+        AppDataBuffer[dataSize++] = dfcnt & 0xff;
+        AppDataBuffer[dataSize++] = (dfcnt >> 8) & 0xff;
+    }
+
+    AppDataSizeBackup = AppDataSize = dataSize;
+}
+
 /*!
  * \brief   Prepares the payload of the frame
  */
 static void PrepareTxFrame( uint8_t port )
 {
-    const LoRaMacRegion_t region = ACTIVE_REGION;
 
+    PrepareDownlinkStatusFrame();
+
+#if 0
+    const LoRaMacRegion_t region = ACTIVE_REGION;
 #if defined( REGION_US915 )
     MibRequestConfirm_t mibReq;
 
@@ -369,8 +450,12 @@ static void PrepareTxFrame( uint8_t port )
     }
 #endif
 
+
     switch( port )
     {
+    case 1: // Downlink PSR
+        break;
+
     case 2:
         switch( region )
         {
@@ -390,8 +475,8 @@ static void PrepareTxFrame( uint8_t port )
                 temperature = ( int16_t )( MPL3115ReadTemperature( ) * 100 );       // in °C * 100
                 altitudeBar = ( int16_t )( MPL3115ReadAltitude( ) * 10 );           // in m * 10
                 batteryLevel = BoardGetBatteryLevel( );                             // 1 (very low) to 254 (fully charged)
-                GpsGetLatestGpsPositionBinary( &latitude, &longitude );
-                altitudeGps = GpsGetLatestGpsAltitude( );                           // in m
+                // GpsGetLatestGpsPositionBinary( &latitude, &longitude );
+               // altitudeGps = GpsGetLatestGpsAltitude( );                           // in m
 
                 AppDataSizeBackup = AppDataSize = 16;
                 AppDataBuffer[0] = AppLedStateOn;
@@ -417,15 +502,16 @@ static void PrepareTxFrame( uint8_t port )
             case LORAMAC_REGION_US915:
             {
                 int16_t temperature = 0;
-                int32_t latitude, longitude = 0;
+                int32_t latitude = 0; 
+                int32_t longitude = 0;
                 uint16_t altitudeGps = 0xFFFF;
                 uint8_t batteryLevel = 0;
 
                 temperature = ( int16_t )( MPL3115ReadTemperature( ) * 100 );       // in °C * 100
 
                 batteryLevel = BoardGetBatteryLevel( );                             // 1 (very low) to 254 (fully charged)
-                GpsGetLatestGpsPositionBinary( &latitude, &longitude );
-                altitudeGps = GpsGetLatestGpsAltitude( );                           // in m
+                // GpsGetLatestGpsPositionBinary( &latitude, &longitude );
+                // altitudeGps = GpsGetLatestGpsAltitude( );                           // in m
 
                 AppDataSizeBackup = AppDataSize = 11;
                 AppDataBuffer[0] = AppLedStateOn;
@@ -474,6 +560,7 @@ static void PrepareTxFrame( uint8_t port )
     default:
         break;
     }
+    #endif
 }
 
 /*!
@@ -556,7 +643,7 @@ static void OnTxNextPacketTimerEvent( void* context )
         else
         {
             DeviceState = DEVICE_STATE_SEND;
-            NextTx = true;
+            // NextTx = true;
         }
     }
 }
@@ -579,6 +666,140 @@ static void OnLed2TimerEvent( void* context )
     TimerStop( &Led2Timer );
     // Switch LED 2 OFF
     GpioWrite( &Led2, 1 );
+}
+
+static void OnDownLinkTimerEvent( void *context )
+{
+    DownLinkHistory.timerExpired = true;
+}
+
+static void OnDownLinkTimeoutEvent( void *context )
+{
+    DownLinkHistory.timeout = true;
+}
+
+static void DownLinkHistoryProcess()
+{
+    uint8_t newline = 0;
+
+    if( DownLinkHistory.timeout )
+    {
+        DeviceState = DEVICE_STATE_SEND;
+        NextTx = true;
+        DownLinkHistory.timeout = false;
+        TimerStart(&DownLinkHistory.timeoutTimer);
+    }
+
+    if ( DownLinkHistory.timerExpired == false )
+       return;
+
+    DownLinkHistory.intervals++;
+
+    SysTime_t now = SysTimeGetMcuTime( );
+    DownLinkHistory.endTime[DownLinkHistory.intervalIx] = now.Seconds;
+
+    printf( "\r\n###### ===== DOWNLINK HISTORY ==== ######\r\n" ); 
+    printf( "%-18s : %lu\r\n", "SYSTIME", now.Seconds);
+
+    printf( "%-18s : %lu\r\n", "DOWNLINKS", DownLinkHistory.downlinks );
+    if ( DownLinkHistory.downlinks == 0)
+       goto exit; 
+
+    // Move current period counts to history
+    for(uint8_t i=0; i < DOWNLINK_RX_SLOT_TYPES; i++)
+        DownLinkHistory.previous[DownLinkHistory.intervalIx][i] = DownLinkHistory.currentByType[i];
+
+    // Display receiveDownLinkCounter history
+    uint8_t nofDfcnt = DOWNLINK_COUNTER_HISTORY_SIZE; 
+    if(DownLinkHistory.downlinks < DOWNLINK_COUNTER_HISTORY_SIZE)
+        nofDfcnt = DownLinkHistory.downlinks;
+
+    printf( "FCNTDWN HISTORY\r\n\t" );
+    uint16_t ix = DownLinkHistory.downlinks % DOWNLINK_COUNTER_HISTORY_SIZE; 
+
+    for(uint8_t i = 0; i < nofDfcnt; i++)
+    {
+        if( newline != 0 )
+        {
+            printf( "\r\n\t" );
+            newline = 0;
+        }
+
+        if ( ix == 0 ) 
+            ix = DOWNLINK_COUNTER_HISTORY_SIZE;
+        ix--; 
+
+        printf ("%04x ", DownLinkHistory.downLinkCounter[ix]);
+
+        if( ( ( i + 1 ) % 8 ) == 0 )
+        {
+            newline = 1;
+        }
+    }
+    printf ("\r\n");
+
+    uint32_t downlinks = 0;
+    for( uint8_t i = 0; i < DOWNLINK_RX_SLOT_TYPES; i++ )
+    {
+        if( newline != 0 )
+        {
+            printf( "\r\n\t" );
+            newline = 0;
+        }
+
+        if( DownLinkHistory.currentByType[i] )
+        {
+            downlinks +=  DownLinkHistory.currentByType[i];
+            DownLinkHistory.totalByType[i] += DownLinkHistory.currentByType[i];
+        }
+    }
+
+    uint32_t intervals = DownLinkHistory.intervals >= DOWNLINK_HISTORY_SAMPLES ? 
+                            DOWNLINK_HISTORY_SAMPLES : DownLinkHistory.intervals;
+
+    printf("LAST %lu INTERVALS\r\n", intervals);
+
+    for( uint8_t i = 0; i < DOWNLINK_RX_SLOT_TYPES; i++ )
+    {
+        if( DownLinkHistory.totalByType[i] )
+        {
+            printf( "\t%s\r\n\t", slotStrings[i]);
+
+            uint8_t  ix    = DownLinkHistory.intervalIx;
+            uint32_t curr   = 0;
+
+            newline = 0;
+
+            while( curr < intervals )
+            {
+                if( newline != 0 )
+                {
+                    printf( "\r\n\t" );
+                    newline = 0;
+                }
+
+                printf( "%02x ", DownLinkHistory.previous[ix][i] );
+                ix = ix > 0 ? ix - 1 : DOWNLINK_HISTORY_SAMPLES-1; 
+
+                if( ( ++curr % 16 ) == 0 )
+                {
+                    newline = 1;
+                }
+            }
+            printf( "\r\n\r\n" );
+        }
+    }
+
+    // reset current count 
+    for(uint8_t i=0; i < DOWNLINK_RX_SLOT_TYPES; i++)
+        DownLinkHistory.currentByType[i] = 0;
+
+exit:
+
+    DownLinkHistory.timerExpired = false;
+    TimerStart(&DownLinkHistory.timer);
+
+    DownLinkHistory.intervalIx = (DownLinkHistory.intervalIx + 1) % DOWNLINK_HISTORY_SAMPLES;
 }
 
 /*!
@@ -749,6 +970,7 @@ static void McpsIndication( McpsIndication_t *mcpsIndication )
 
     if( mcpsIndication->RxData == true )
     {
+        #if 0
         switch( mcpsIndication->Port )
         {
         case 1: // The application LED can be controlled on port 1 or 2
@@ -788,7 +1010,7 @@ static void McpsIndication( McpsIndication_t *mcpsIndication )
 #if defined( REGION_EU868 ) || defined( REGION_RU864 ) || defined( REGION_CN779 ) || defined( REGION_EU433 )
                     LoRaMacTestSetDutyCycleOn( false );
 #endif
-                    GpsStop( );
+                    // GpsStop( );
                 }
             }
             else
@@ -810,7 +1032,7 @@ static void McpsIndication( McpsIndication_t *mcpsIndication )
 #if defined( REGION_EU868 ) || defined( REGION_RU864 ) || defined( REGION_CN779 ) || defined( REGION_EU433 )
                     LoRaMacTestSetDutyCycleOn( LORAWAN_DUTYCYCLE_ON );
 #endif
-                    GpsStart( );
+                    // GpsStart( );
                     break;
                 case 1: // (iii, iv)
                     AppDataSize = 2;
@@ -857,7 +1079,7 @@ static void McpsIndication( McpsIndication_t *mcpsIndication )
 #if defined( REGION_EU868 ) || defined( REGION_RU864 ) || defined( REGION_CN779 ) || defined( REGION_EU433 )
                         LoRaMacTestSetDutyCycleOn( LORAWAN_DUTYCYCLE_ON );
 #endif
-                        GpsStart( );
+                        // GpsStart( );
 
                         JoinNetwork( );
                     }
@@ -895,24 +1117,41 @@ static void McpsIndication( McpsIndication_t *mcpsIndication )
         default:
             break;
         }
+        #endif
+
+        if((mcpsIndication->RxSlot < DOWNLINK_RX_SLOT_TYPES))
+        {
+            DownLinkHistory.currentByType[mcpsIndication->RxSlot]++;
+
+            uint16_t histIx = DownLinkHistory.downlinks % DOWNLINK_COUNTER_HISTORY_SIZE;
+            DownLinkHistory.downLinkCounter[histIx] = mcpsIndication->DownLinkCounter;
+            DownLinkHistory.downlinks++;
+
+            DeviceState = DEVICE_STATE_SEND;
+            NextTx = true;
+
+            // Restart timeout timer
+            TimerStop( &DownLinkHistory.timeoutTimer);
+            TimerStart( &DownLinkHistory.timeoutTimer);
+        }
     }
 
     // Switch LED 2 ON for each received downlink
     GpioWrite( &Led2, 0 );
     TimerStart( &Led2Timer );
 
-    const char *slotStrings[] = { "1", "2", "C", "Ping-Slot", "Multicast Ping-Slot" };
+
 
     printf( "\r\n###### ===== DOWNLINK FRAME %lu ==== ######\r\n", mcpsIndication->DownLinkCounter );
 
-    printf( "RX WINDOW   : %s\r\n", slotStrings[mcpsIndication->RxSlot] );
-    
+    printf( "RX WINDOW   : %s\r\n", slotStrings[mcpsIndication->RxSlot] ); 
     printf( "RX PORT     : %d\r\n", mcpsIndication->Port );
 
     if( mcpsIndication->BufferSize != 0 )
     {
         printf( "RX DATA     : \r\n" );
         PrintHexBuffer( mcpsIndication->Buffer, mcpsIndication->BufferSize );
+
     }
 
     printf( "\r\n" );
@@ -957,6 +1196,16 @@ static void MlmeConfirm( MlmeConfirm_t *mlmeConfirm )
                 printf( "\r\n" );
                 // Status is OK, node has joined the network
                 DeviceState = DEVICE_STATE_SEND;
+                NextTx = true;
+
+                // Start downlink history event
+                TimerInit( &DownLinkHistory.timer, OnDownLinkTimerEvent );
+                TimerSetValue( &DownLinkHistory.timer, DownLinkHistory.intervalSecs * 1000 );
+                TimerStart( &DownLinkHistory.timer);
+
+                TimerInit( &DownLinkHistory.timeoutTimer, OnDownLinkTimeoutEvent );
+                TimerSetValue( &DownLinkHistory.timeoutTimer, DOWNLINK_TIMEOUT_SECONDS * 1000 ); 
+                TimerStart( &DownLinkHistory.timeoutTimer);
             }
             else
             {
@@ -1054,6 +1303,10 @@ int main( void )
         }
         // Processes the LoRaMac events
         LoRaMacProcess( );
+
+   
+        if( DownLinkHistory.timerExpired )
+            DownLinkHistoryProcess();
 
         switch( DeviceState )
         {
