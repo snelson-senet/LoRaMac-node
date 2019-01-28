@@ -94,6 +94,11 @@ static uint8_t JoinEui[] = LORAWAN_JOIN_EUI;
 static uint8_t AppKey[] = LORAWAN_APP_KEY;
 static uint8_t NwkKey[] = LORAWAN_NWK_KEY;
 
+static uint32_t McastAddr = LORAWAN_MCAST_ADDRESS; 
+static uint8_t McNwkSKey[] = MCAST_NWK_SKEY;
+static uint8_t McAppSKey[] = MCAST_APP_SKEY;
+
+
 #if( OVER_THE_AIR_ACTIVATION == 0 )
 
 static uint8_t FNwkSIntKey[] = LORAWAN_F_NWK_S_INT_KEY;
@@ -293,7 +298,7 @@ const char* EventInfoStatusStrings[] =
 #define DOWNLINK_RX_SLOT_TYPES   5
 #define DOWNLINK_PERIOD_SECONDS  60
 #define DOWNLINK_HISTORY_SAMPLES 15
-#define DOWNLINK_COUNTER_HISTORY_SIZE 25 
+#define DOWNLINK_COUNTER_HISTORY_SIZE 1024
 #define DOWNLINK_TIMEOUT_SECONDS 60
 
 typedef struct DownLinkHistory_s{
@@ -387,39 +392,69 @@ static void JoinNetwork( void )
 void PrepareDownlinkStatusFrame()
 {
     uint8_t dataSize = 0;
+    uint16_t count   = 0;
+    uint16_t dfcnt;
 
-     uint16_t downlinks = DownLinkHistory.downlinks;
+     // Write Total downlinks 
+     AppDataBuffer[dataSize++] = DownLinkHistory.downlinks & 0xff;
+     AppDataBuffer[dataSize++] = (DownLinkHistory.downlinks >> 8) & 0xff;
 
-     // Total downlinks 
-     AppDataBuffer[dataSize++] = downlinks & 0xff;
-     AppDataBuffer[dataSize++] = (downlinks >> 8) & 0xff;
+    // Write last received DFCnt
+    uint16_t ix = DownLinkHistory.downlinks % DOWNLINK_COUNTER_HISTORY_SIZE;
+    if ( ix ==  0 ) 
+        ix = DOWNLINK_COUNTER_HISTORY_SIZE;
+    ix--; 
 
+    dfcnt = DownLinkHistory.downLinkCounter[ix];
+    AppDataBuffer[dataSize++] = dfcnt & 0xff;
+    AppDataBuffer[dataSize++] = ( dfcnt >> 8 ) & 0xff;
+    count++;
 
-     // Last DownLinkCounters
-    uint8_t count = DOWNLINK_COUNTER_HISTORY_SIZE;
-    if( DownLinkHistory.downlinks < DOWNLINK_COUNTER_HISTORY_SIZE )
-        count = DownLinkHistory.downlinks;
+    if ( ix == 0 )
+        ix = DOWNLINK_COUNTER_HISTORY_SIZE;
+    ix--;
 
-
-    // Get the max applicative payload size
+    // Get max applicative payload size
     LoRaMacTxInfo_t txInfo;
     LoRaMacQueryTxPossible( dataSize, &txInfo );
 
-    uint8_t ix = DownLinkHistory.downlinks % DOWNLINK_COUNTER_HISTORY_SIZE;
-    for(uint8_t i=0; i < count; i++)
+    // printf ("Downlinks:%lu, LastDFCnt:%u\r\n", DownLinkHistory.downlinks, dfcnt);
+
+    // Encode remaining payload bytes with previous downlinks rx status
+    while ( ( dataSize < txInfo.MaxPossibleApplicationDataSize ) && ( count < DownLinkHistory.downlinks ) )
     {
-        if( ( dataSize  + 2 ) > txInfo.MaxPossibleApplicationDataSize) 
-           break; 
+        AppDataBuffer[dataSize] = 0;
 
-        if( ix ==  0 ) 
-            ix = DOWNLINK_COUNTER_HISTORY_SIZE;
-        ix--; 
-            
-        uint16_t dfcnt = DownLinkHistory.downLinkCounter[ix];
-        AppDataBuffer[dataSize++] = dfcnt & 0xff;
-        AppDataBuffer[dataSize++] = (dfcnt >> 8) & 0xff;
+        // Encode previous 8 downlinks state
+        for(uint8_t i = 1; i <= 8; i++ )
+        {
+            // printf ("Downlink:%d, ", dfcnt - i);
+            if( DownLinkHistory.downLinkCounter[ix] == ( dfcnt - i ) )
+            {
+                // printf ("Received\r\n");
+                AppDataBuffer[dataSize] |= 1 << ( 8 - i );
+
+                // Get previous received downlink  index
+                if ( ix ==  0 ) 
+                    ix = DOWNLINK_COUNTER_HISTORY_SIZE;
+                ix--; 
+
+                if( ++count >= DownLinkHistory.downlinks ) 
+                    break;
+            }
+            else
+            {
+                // printf ("Not Received : previous ix:%u, dfcnt:%u\r\n", ix,
+                //    DownLinkHistory.downLinkCounter[ix]);
+            }
+
+        }
+        // printf ("Downlink[%d - %d] = %02X\r\n", dfcnt-1, dfcnt-8, AppDataBuffer[dataSize]);
+        dfcnt -= 8;
+
+        dataSize++;
     }
-
+            
     AppDataSizeBackup = AppDataSize = dataSize;
 }
 
@@ -680,7 +715,6 @@ static void OnDownLinkTimeoutEvent( void *context )
 
 static void DownLinkHistoryProcess()
 {
-    uint8_t newline = 0;
 
     if( DownLinkHistory.timeout )
     {
@@ -710,10 +744,12 @@ static void DownLinkHistoryProcess()
         DownLinkHistory.previous[DownLinkHistory.intervalIx][i] = DownLinkHistory.currentByType[i];
 
     // Display receiveDownLinkCounter history
-    uint8_t nofDfcnt = DOWNLINK_COUNTER_HISTORY_SIZE; 
+#if 0
+    uint32_t nofDfcnt = DOWNLINK_COUNTER_HISTORY_SIZE; 
     if(DownLinkHistory.downlinks < DOWNLINK_COUNTER_HISTORY_SIZE)
         nofDfcnt = DownLinkHistory.downlinks;
 
+    uint8_t newline = 0;
     printf( "FCNTDWN HISTORY\r\n\t" );
     uint16_t ix = DownLinkHistory.downlinks % DOWNLINK_COUNTER_HISTORY_SIZE; 
 
@@ -789,6 +825,7 @@ static void DownLinkHistoryProcess()
             printf( "\r\n\r\n" );
         }
     }
+#endif
 
     // reset current count 
     for(uint8_t i=0; i < DOWNLINK_RX_SLOT_TYPES; i++)
@@ -968,6 +1005,21 @@ static void McpsIndication( McpsIndication_t *mcpsIndication )
         ComplianceTest.DownLinkCounter++;
     }
 
+    uint16_t histIx = DownLinkHistory.downlinks % DOWNLINK_COUNTER_HISTORY_SIZE; 
+    DownLinkHistory.downLinkCounter[histIx] = mcpsIndication->DownLinkCounter;
+    DownLinkHistory.downlinks++;
+    if((mcpsIndication->RxSlot < DOWNLINK_RX_SLOT_TYPES))
+    {
+        DownLinkHistory.currentByType[mcpsIndication->RxSlot]++;
+
+        DeviceState = DEVICE_STATE_SEND;
+        NextTx = true;
+
+        // Restart timeout timer
+        TimerStop( &DownLinkHistory.timeoutTimer);
+        TimerStart( &DownLinkHistory.timeoutTimer);
+    }
+
     if( mcpsIndication->RxData == true )
     {
         #if 0
@@ -1118,22 +1170,6 @@ static void McpsIndication( McpsIndication_t *mcpsIndication )
             break;
         }
         #endif
-
-        if((mcpsIndication->RxSlot < DOWNLINK_RX_SLOT_TYPES))
-        {
-            DownLinkHistory.currentByType[mcpsIndication->RxSlot]++;
-
-            uint16_t histIx = DownLinkHistory.downlinks % DOWNLINK_COUNTER_HISTORY_SIZE;
-            DownLinkHistory.downLinkCounter[histIx] = mcpsIndication->DownLinkCounter;
-            DownLinkHistory.downlinks++;
-
-            DeviceState = DEVICE_STATE_SEND;
-            NextTx = true;
-
-            // Restart timeout timer
-            TimerStop( &DownLinkHistory.timeoutTimer);
-            TimerStart( &DownLinkHistory.timeoutTimer);
-        }
     }
 
     // Switch LED 2 ON for each received downlink
@@ -1292,7 +1328,9 @@ int main( void )
 
     DeviceState = DEVICE_STATE_RESTORE;
 
-    printf( "###### ===== ClassC demo application v1.0.RC1 ==== ######\r\n\r\n" );
+    printf( "\r\n###### ===== DownLink PSR Multicast/ClassC Demo Application v1.0.0==== ######\r\n" );
+    printf( "\tDate: %s, %s\r\n", __DATE__, __TIME__ );
+    printf( "\tFile: %s\r\n\r\n", __FILE__); 
 
     while( 1 )
     {
@@ -1372,7 +1410,56 @@ int main( void )
                     LoRaMacMibSetRequestConfirm( &mibReq );
 #endif
                 }
+
+                if(  McastAddr != 0 ) 
+                {
+                    MulticastChannel_t channel;
+
+                    printf ( "\tMulticast Address : %08lX\r\n", McastAddr );
+                    printf ( "\tMcNwkSKey   : " );
+                    printf( "%02X", McNwkSKey[0] );
+                    for( int i = 1; i < 16; i++ )
+                        printf( "-%02X", McNwkSKey[i] );
+                    printf( "\r\n" );
+
+                    printf ( "\tMcAppSKey   : " );
+                    printf( "%02X", McAppSKey[0] );
+                    for( int i = 1; i < 16; i++ )
+                        printf( "-%02X", McAppSKey[i] );
+                    printf( "\r\n" );
+
+                    // Add multicast session keys
+                    mibReq.Type = MIB_MC_NWK_S_KEY_0;
+                    mibReq.Param.McNwkSKey0 = McNwkSKey;
+                    status = LoRaMacMibSetRequestConfirm( &mibReq );
+                    if(status != LORAMAC_STATUS_OK)
+                    {
+                        printf ("Set McNwkSKey error:%d\r\n", status);
+                    }
+
+                    mibReq.Type = MIB_MC_APP_S_KEY_0;
+                    mibReq.Param.McAppSKey0 = McAppSKey;
+                    status = LoRaMacMibSetRequestConfirm( &mibReq );
+                    if(status != LORAMAC_STATUS_OK)
+                    {
+                        printf ("Set McAppSKey error:%d\r\n", status);
+                    }
+
+                    // Enable multicast address
+                    channel.AddrID    = MULTICAST_0_ADDR;
+                    channel.Address   = McastAddr;
+                    channel.IsEnabled = true;
+                    channel.Frequency = MCAST_FREQUENCY;
+                    channel.Datarate  = MCAST_DATARATE;
+                    status = LoRaMacMulticastChannelSet( channel );
+                    if(status != LORAMAC_STATUS_OK)
+                    {
+                        printf ("Set MulticastChannel error:%d\r\n", status);
+                    }
+                }
+
                 DeviceState = DEVICE_STATE_START;
+
                 break;
             }
 
@@ -1422,23 +1509,24 @@ int main( void )
                         NextTx = true;
                     }
                 }
+                // Multicast configuration
                 break;
             }
             case DEVICE_STATE_JOIN:
             {
-                printf( "DevEui      : %02X", DevEui[0] );
+                printf( "\tDevEui      : %02X", DevEui[0] );
                 for( int i = 1; i < 8; i++ )
                 {
                     printf( "-%02X", DevEui[i] );
                 }
                 printf( "\r\n" );
-                printf( "AppEui      : %02X", JoinEui[0] );
+                printf( "\tAppEui      : %02X", JoinEui[0] );
                 for( int i = 1; i < 8; i++ )
                 {
                     printf( "-%02X", JoinEui[i] );
                 }
                 printf( "\r\n" );
-                printf( "AppKey      : %02X", NwkKey[0] );
+                printf( "\tAppKey      : %02X", NwkKey[0] );
                 for( int i = 1; i < 16; i++ )
                 {
                     printf( " %02X", NwkKey[i] );

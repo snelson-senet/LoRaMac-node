@@ -221,6 +221,7 @@ SecureElementStatus_t SecureElementSetKey( KeyIdentifier_t keyID, uint8_t* key )
     {
         if( SeNvmCtx.KeyList[i].KeyID == keyID )
         {
+#if 0 
             if( LORAMAC_CRYPTO_MULITCAST_KEYS < SeNvmCtx.KeyList[i].KeyID )
             {  // Decrypt the key if its a Mulitcast key
 
@@ -233,6 +234,7 @@ SecureElementStatus_t SecureElementSetKey( KeyIdentifier_t keyID, uint8_t* key )
                 }
             }
             else
+#endif
             {
                 memcpy1( SeNvmCtx.KeyList[i].KeyValue, key, KEY_SIZE );
                 SeNvmCtxChanged( );
