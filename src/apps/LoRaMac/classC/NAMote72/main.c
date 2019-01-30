@@ -46,7 +46,7 @@
 /*!
  * Defines the application data transmission duty cycle. 5s, value in [ms].
  */
-#define APP_TX_DUTYCYCLE                            60000
+#define APP_TX_DUTYCYCLE                            300000
 
 /*!
  * Defines a random delay for application data transmission duty cycle. 1s,
@@ -299,7 +299,7 @@ const char* EventInfoStatusStrings[] =
 #define DOWNLINK_PERIOD_SECONDS  60
 #define DOWNLINK_HISTORY_SAMPLES 15
 #define DOWNLINK_COUNTER_HISTORY_SIZE 1024
-#define DOWNLINK_TIMEOUT_SECONDS 60
+#define DOWNLINK_TIMEOUT_SECONDS 300 
 
 typedef struct DownLinkHistory_s{
     uint32_t     downlinks;
@@ -1300,6 +1300,7 @@ static void MlmeIndication( MlmeIndication_t *mlmeIndication )
 void OnMacProcessNotify( void )
 {
     IsMacProcessPending = 1;
+    // printf("%s\r\n",__func__);
 }
 
 /**
@@ -1415,19 +1416,6 @@ int main( void )
                 {
                     MulticastChannel_t channel;
 
-                    printf ( "\tMulticast Address : %08lX\r\n", McastAddr );
-                    printf ( "\tMcNwkSKey   : " );
-                    printf( "%02X", McNwkSKey[0] );
-                    for( int i = 1; i < 16; i++ )
-                        printf( "-%02X", McNwkSKey[i] );
-                    printf( "\r\n" );
-
-                    printf ( "\tMcAppSKey   : " );
-                    printf( "%02X", McAppSKey[0] );
-                    for( int i = 1; i < 16; i++ )
-                        printf( "-%02X", McAppSKey[i] );
-                    printf( "\r\n" );
-
                     // Add multicast session keys
                     mibReq.Type = MIB_MC_NWK_S_KEY_0;
                     mibReq.Param.McNwkSKey0 = McNwkSKey;
@@ -1529,9 +1517,24 @@ int main( void )
                 printf( "\tAppKey      : %02X", NwkKey[0] );
                 for( int i = 1; i < 16; i++ )
                 {
-                    printf( " %02X", NwkKey[i] );
+                    printf( "-%02X", NwkKey[i] );
                 }
-                printf( "\n\r\n" );
+                printf( "\r\n" );
+
+                printf( "\tMcAddr      : %08lX\r\n", McastAddr );
+
+                printf( "\tMcNwkSKey   : " );
+                printf( "%02X", McNwkSKey[0] );
+                for( int i = 1; i < 16; i++ )
+                    printf( "-%02X", McNwkSKey[i] );
+                printf( "\r\n" );
+
+                printf ( "\tMcAppSKey   : " );
+                printf( "%02X", McAppSKey[0] );
+                for( int i = 1; i < 16; i++ )
+                    printf( "-%02X", McAppSKey[i] );
+                printf( "\r\n\r\n" );
+
 #if( OVER_THE_AIR_ACTIVATION == 0 )
                 printf( "###### ===== JOINED ==== ######\r\n" );
                 printf( "\r\nABP\r\n\r\n" );
@@ -1605,6 +1608,7 @@ int main( void )
                 if( IsMacProcessPending == 1 )
                 {
                     // Clear flag and prevent MCU to go into low power modes.
+                    // printf("DEVICE_STATE_SLEEP: clearing IsMacProcessPending\r\n");
                     IsMacProcessPending = 0;
                 }
                 else
