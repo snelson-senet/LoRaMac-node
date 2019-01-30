@@ -1176,7 +1176,11 @@ static void ProcessRadioRxDone( void )
                     MacCtx.McpsIndication.Status = LORAMAC_EVENT_INFO_STATUS_ADDRESS_FAIL;
 
                     // Abort the reception, if we are not in RX_SLOT_WIN_CLASS_C
-                    if( MacCtx.McpsIndication.RxSlot != RX_SLOT_WIN_CLASS_C )
+
+                    // If PrepareRxDoneAbort() is not called the Class C slot is not
+                    // reopened
+
+                    // if( MacCtx.McpsIndication.RxSlot != RX_SLOT_WIN_CLASS_C )
                     {
                         PrepareRxDoneAbort( );
                     }
@@ -1305,7 +1309,6 @@ static void ProcessRadioRxDone( void )
             // Provide always an indication, skip the callback to the user application,
             // in case of a confirmed downlink retransmission.
             MacCtx.MacFlags.Bits.McpsInd = 1;
-
             break;
         case FRAME_TYPE_PROPRIETARY:
             memcpy1( MacCtx.RxPayload, &payload[pktHeaderLen], size - pktHeaderLen );
