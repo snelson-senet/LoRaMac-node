@@ -276,6 +276,20 @@ SecureElementStatus_t SecureElementVerifyAesCmac( uint8_t* buffer, uint16_t size
     if( expectedCmac != compCmac )
     {
         retval = SECURE_ELEMENT_FAIL_CMAC;
+
+        Key_t* keyItem;
+        GetKeyByID( keyID, &keyItem );
+
+        printf("%s: MIC expected=%08x, calculated=%08x\r\n", __func__, expectedCmac, compCmac);
+        printf("\tKey(%d): ",keyID);
+        for(uint8_t i = 0; i < 16; i++ )
+            printf("%02x", keyItem->KeyValue[i]);
+        printf("\r\n");
+
+        printf("\tBuffer: ");
+        for(uint8_t i = 0; i < size; i++ )
+            printf("%02x", buffer[i]);
+        printf("\r\n");
     }
 
     return retval;

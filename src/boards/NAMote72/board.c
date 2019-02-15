@@ -623,9 +623,44 @@ void BoardLowPowerHandler( void )
 /*
  * Function to be used by stdout for printf etc
  */
+
+uint32_t HAL_UART_TxCpltCallbackUart1Count = 0;
+uint32_t HAL_UART_TxCpltCallbackUart2Count = 0;
+uint32_t HAL_UART_TxCpltCallbackUnknownCount = 0;
+
 int _write( int fd, const void *buf, size_t count )
 {
-    while( UartPutBuffer( &Uart2, ( uint8_t* )buf, ( uint16_t )count ) != 0 ){ };
+    static uint32_t UpbRetryDelay = 1;
+    static uint32_t UpbOk = 0;
+    static uint32_t UpbOkCount = 0;
+    static uint32_t UpbTimeout = 0;
+    #define UPB_RETRY_COUNT 10
+
+    uint8_t retry_count = 0;
+    while( (UartPutBuffer( &Uart2, ( uint8_t* )buf, ( uint16_t )count ) != 0 ) && (retry_count < UPB_RETRY_COUNT))
+    { 
+        retry_count++;
+        HAL_Delay(UpbRetryDelay);
+    };
+
+    if(retry_count >= UPB_RETRY_COUNT)
+    {
+        UpbTimeout++;
+        if(UpbOk > 0)
+        {
+            UpbOk = 0;
+            UpbOkCount = 0;
+            HAL_UART_TxCpltCallbackUart1Count = 0;
+            HAL_UART_TxCpltCallbackUart2Count = 0;
+            HAL_UART_TxCpltCallbackUnknownCount = 0;
+        }
+    }
+    else if(retry_count == 0)
+    {
+        UpbOk++;
+        UpbOkCount += count;
+    }
+
     return count;
 }
 

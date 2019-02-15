@@ -339,6 +339,10 @@ uint8_t UartMcuGetBuffer( Uart_t *obj, uint8_t *buffer, uint16_t size, uint16_t 
     return 0; // OK
 }
 
+extern uint32_t HAL_UART_TxCpltCallbackUart1Count;
+extern uint32_t HAL_UART_TxCpltCallbackUart2Count;
+extern uint32_t HAL_UART_TxCpltCallbackUnknownCount;
+
 void HAL_UART_TxCpltCallback( UART_HandleTypeDef *handle )
 {
     Uart_t *uart = &Uart1;
@@ -348,17 +352,21 @@ void HAL_UART_TxCpltCallback( UART_HandleTypeDef *handle )
     {
         uart = &Uart1;
         uartId = UART_1;
+        HAL_UART_TxCpltCallbackUart1Count++;
     }
     else if( handle == &UartContext[UART_2].UartHandle )
     {
         uart = &Uart2;
         uartId = UART_2;
+        HAL_UART_TxCpltCallbackUart2Count++;
     }
     else
     {
         // Unknown UART peripheral skip processing
+        HAL_UART_TxCpltCallbackUnknownCount++;
         return;
     }
+
     if( IsFifoEmpty( &uart->FifoTx ) == false )
     {
         UartContext[uartId].TxData = FifoPop( &uart->FifoTx );

@@ -1419,6 +1419,7 @@ LoRaMacCryptoStatus_t LoRaMacCryptoUnsecureMessage( AddressIdentifier_t addrID, 
 
     if( CheckFCntDown( fCntID, fCntDown ) == false )
     {
+        printf("%s: LORAMAC_CRYPTO_FAIL_FCNT\r\n",__func__);
         return LORAMAC_CRYPTO_FAIL_FCNT;
     }
 
@@ -1430,6 +1431,7 @@ LoRaMacCryptoStatus_t LoRaMacCryptoUnsecureMessage( AddressIdentifier_t addrID, 
     // Parse the message
     if( LoRaMacParserData( macMsg ) != LORAMAC_PARSER_SUCCESS )
     {
+        printf("%s: LORAMAC_CRYPTO_ERROR_PARSER\r\n",__func__);
         return LORAMAC_CRYPTO_ERROR_PARSER;
     }
 
@@ -1437,13 +1439,16 @@ LoRaMacCryptoStatus_t LoRaMacCryptoUnsecureMessage( AddressIdentifier_t addrID, 
     retval = GetKeyAddrItem( addrID, &curItem );
     if( retval != LORAMAC_CRYPTO_SUCCESS )
     {
+        printf("%s: GetKeyAddrItem(%u) error:%d\r\n",__func__, addrID, retval); 
         return retval;
     }
     FRMPayloadDecryptionKeyID = curItem->AppSkey;
+    micComputationKeyID = curItem->NwkSkey;
 
     // Check if it is our address
     if( address != macMsg->FHDR.DevAddr )
     {
+        printf("%s: LORAMAC_CRYPTO_FAIL_ADDRESS (%08x != %08x)\r\n",__func__, macMsg->FHDR.DevAddr, address );
         return LORAMAC_CRYPTO_FAIL_ADDRESS;
     }
 

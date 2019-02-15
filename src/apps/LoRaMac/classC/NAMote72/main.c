@@ -34,6 +34,9 @@
 #include "Commissioning.h"
 #include "NvmCtxMgmt.h"
 #include "systime.h"
+#include "LoRaMacFCntHandler.h"
+#include "delay.h"
+#include "eeprom.h"
 
 #ifndef ACTIVE_REGION
 
@@ -89,14 +92,20 @@
  */
 #define LORAWAN_APP_PORT                            1
 
+#define LORAWAN_DOWNLINK_RECEIVED_PORT              1
+#define LORAWAN_DOWNLINK_TIMEOUT_PORT               2
+
 static uint8_t DevEui[] = LORAWAN_DEVICE_EUI;
 static uint8_t JoinEui[] = LORAWAN_JOIN_EUI;
 static uint8_t AppKey[] = LORAWAN_APP_KEY;
 static uint8_t NwkKey[] = LORAWAN_NWK_KEY;
 
-static uint32_t McastAddr = LORAWAN_MCAST_ADDRESS; 
-static uint8_t McNwkSKey[] = MCAST_NWK_SKEY;
-static uint8_t McAppSKey[] = MCAST_APP_SKEY;
+#define MCAST_DFCNT_SAVE_GAP  100
+#define MCAST_DFCNT_ADDRESS   0x1FF0
+static uint32_t McastAddr   = LORAWAN_MCAST_ADDRESS; 
+static uint8_t  McNwkSKey[] = MCAST_NWK_SKEY;
+static uint8_t  McAppSKey[] = MCAST_APP_SKEY;
+static uint32_t McastDFCnt  = 0;
 
 
 #if( OVER_THE_AIR_ACTIVATION == 0 )
@@ -152,7 +161,7 @@ static TimerEvent_t TxNextPacketTimer;
 /*!
  * Specifies the state of the application LED
  */
-static bool AppLedStateOn = false;
+// static bool AppLedStateOn = false;
 
 /*!
  * Timer to handle the state of LED1
@@ -299,7 +308,7 @@ const char* EventInfoStatusStrings[] =
 #define DOWNLINK_PERIOD_SECONDS  60
 #define DOWNLINK_HISTORY_SAMPLES 15
 #define DOWNLINK_COUNTER_HISTORY_SIZE 1024
-#define DOWNLINK_TIMEOUT_SECONDS 300 
+#define DOWNLINK_TIMEOUT_SECONDS 120 
 
 typedef struct DownLinkHistory_s{
     uint32_t     downlinks;
@@ -332,6 +341,7 @@ DownLinkHistory_t DownLinkHistory =
 };
 
 const char *slotStrings[] = { "RX1", "RX2", "CLASS-C", "PING-SLOT", "MCAST-PING-SLOT" };
+
 
 /*!
  * Prints the provided buffer in HEX
@@ -394,6 +404,7 @@ void PrepareDownlinkStatusFrame()
     uint8_t dataSize = 0;
     uint16_t count   = 0;
     uint16_t dfcnt;
+    static bool debug = false;
 
      // Write Total downlinks 
      AppDataBuffer[dataSize++] = DownLinkHistory.downlinks & 0xff;
@@ -418,7 +429,8 @@ void PrepareDownlinkStatusFrame()
     LoRaMacTxInfo_t txInfo;
     LoRaMacQueryTxPossible( dataSize, &txInfo );
 
-    // printf ("Downlinks:%lu, LastDFCnt:%u\r\n", DownLinkHistory.downlinks, dfcnt);
+    if(debug)
+        printf ("Downlinks:%lu, LastDFCnt:%u\r\n", DownLinkHistory.downlinks, dfcnt);
 
     // Encode remaining payload bytes with previous downlinks rx status
     while ( ( dataSize < txInfo.MaxPossibleApplicationDataSize ) && ( count < DownLinkHistory.downlinks ) )
@@ -428,10 +440,8 @@ void PrepareDownlinkStatusFrame()
         // Encode previous 8 downlinks state
         for(uint8_t i = 1; i <= 8; i++ )
         {
-            // printf ("Downlink:%d, ", dfcnt - i);
             if( DownLinkHistory.downLinkCounter[ix] == ( dfcnt - i ) )
             {
-                // printf ("Received\r\n");
                 AppDataBuffer[dataSize] |= 1 << ( 8 - i );
 
                 // Get previous received downlink  index
@@ -442,14 +452,10 @@ void PrepareDownlinkStatusFrame()
                 if( ++count >= DownLinkHistory.downlinks ) 
                     break;
             }
-            else
-            {
-                // printf ("Not Received : previous ix:%u, dfcnt:%u\r\n", ix,
-                //    DownLinkHistory.downLinkCounter[ix]);
-            }
-
         }
-        // printf ("Downlink[%d - %d] = %02X\r\n", dfcnt-1, dfcnt-8, AppDataBuffer[dataSize]);
+        if ( debug )
+            printf ("%u: Downlink[%d - %d]=%02X\r\n", dataSize, dfcnt-1, dfcnt-8, AppDataBuffer[dataSize]);
+
         dfcnt -= 8;
 
         dataSize++;
@@ -722,6 +728,7 @@ static void DownLinkHistoryProcess()
         NextTx = true;
         DownLinkHistory.timeout = false;
         TimerStart(&DownLinkHistory.timeoutTimer);
+        AppPort = LORAWAN_DOWNLINK_TIMEOUT_PORT;              
     }
 
     if ( DownLinkHistory.timerExpired == false )
@@ -1005,19 +1012,30 @@ static void McpsIndication( McpsIndication_t *mcpsIndication )
         ComplianceTest.DownLinkCounter++;
     }
 
-    uint16_t histIx = DownLinkHistory.downlinks % DOWNLINK_COUNTER_HISTORY_SIZE; 
-    DownLinkHistory.downLinkCounter[histIx] = mcpsIndication->DownLinkCounter;
-    DownLinkHistory.downlinks++;
-    if((mcpsIndication->RxSlot < DOWNLINK_RX_SLOT_TYPES))
+    // Only track multicas downlink history
+    if (mcpsIndication->Multicast )
     {
-        DownLinkHistory.currentByType[mcpsIndication->RxSlot]++;
+        uint16_t histIx = DownLinkHistory.downlinks % DOWNLINK_COUNTER_HISTORY_SIZE; 
+        DownLinkHistory.downLinkCounter[histIx] = mcpsIndication->DownLinkCounter;
+        DownLinkHistory.downlinks++;
+        if((mcpsIndication->RxSlot < DOWNLINK_RX_SLOT_TYPES))
+        {
+            DownLinkHistory.currentByType[mcpsIndication->RxSlot]++;
 
-        DeviceState = DEVICE_STATE_SEND;
-        NextTx = true;
+            DeviceState = DEVICE_STATE_SEND;
+            NextTx = true;
+            AppPort = LORAWAN_DOWNLINK_RECEIVED_PORT;              
 
-        // Restart timeout timer
-        TimerStop( &DownLinkHistory.timeoutTimer);
-        TimerStart( &DownLinkHistory.timeoutTimer);
+            // Restart timeout timer
+            TimerStop( &DownLinkHistory.timeoutTimer);
+            TimerStart( &DownLinkHistory.timeoutTimer);
+        }
+
+        if( ( mcpsIndication->DownLinkCounter - McastDFCnt ) > MCAST_DFCNT_SAVE_GAP ) 
+        {
+            McastDFCnt = mcpsIndication->DownLinkCounter;
+            EepromWriteBuffer(MCAST_DFCNT_ADDRESS, (uint8_t *)&McastDFCnt, 4);
+        }
     }
 
     if( mcpsIndication->RxData == true )
@@ -1181,6 +1199,7 @@ static void McpsIndication( McpsIndication_t *mcpsIndication )
     printf( "\r\n###### ===== DOWNLINK FRAME %lu ==== ######\r\n", mcpsIndication->DownLinkCounter );
 
     printf( "RX WINDOW   : %s\r\n", slotStrings[mcpsIndication->RxSlot] ); 
+    printf( "RX DEVADDR  : %lX\r\n", mcpsIndication->DevAddress );
     printf( "RX PORT     : %d\r\n", mcpsIndication->Port );
 
     if( mcpsIndication->BufferSize != 0 )
@@ -1242,6 +1261,15 @@ static void MlmeConfirm( MlmeConfirm_t *mlmeConfirm )
                 TimerInit( &DownLinkHistory.timeoutTimer, OnDownLinkTimeoutEvent );
                 TimerSetValue( &DownLinkHistory.timeoutTimer, DOWNLINK_TIMEOUT_SECONDS * 1000 ); 
                 TimerStart( &DownLinkHistory.timeoutTimer);
+
+                LoRaMacSetFCntDown( MC_FCNT_DOWN_0, McastDFCnt );
+
+                // Change to Class C
+                MibRequestConfirm_t mibReq;
+                mibReq.Type = MIB_DEVICE_CLASS;
+                mibReq.Param.Class = CLASS_C;
+                LoRaMacMibSetRequestConfirm( &mibReq );
+
             }
             else
             {
@@ -1329,9 +1357,17 @@ int main( void )
 
     DeviceState = DEVICE_STATE_RESTORE;
 
+    for(uint8_t i=10; i>0; i--){
+        printf("Starting in %d seconds\r\n",i);
+        DelayMs(1000);
+    }
+
     printf( "\r\n###### ===== DownLink PSR Multicast/ClassC Demo Application v1.0.0==== ######\r\n" );
     printf( "\tDate: %s, %s\r\n", __DATE__, __TIME__ );
     printf( "\tFile: %s\r\n\r\n", __FILE__); 
+
+    // Restore Multicast Downlink
+    EepromReadBuffer(MCAST_DFCNT_ADDRESS, (uint8_t *)&McastDFCnt, 4);
 
     while( 1 )
     {
@@ -1476,10 +1512,6 @@ int main( void )
                 mibReq.Param.SystemMaxRxError = 20;
                 LoRaMacMibSetRequestConfirm( &mibReq );
 
-                mibReq.Type = MIB_DEVICE_CLASS;
-                mibReq.Param.Class = CLASS_C;
-                LoRaMacMibSetRequestConfirm( &mibReq );
-
                 LoRaMacStart( );
 
                 mibReq.Type = MIB_NETWORK_ACTIVATION;
@@ -1493,6 +1525,10 @@ int main( void )
                     }
                     else
                     {
+                        mibReq.Type = MIB_DEVICE_CLASS;
+                        mibReq.Param.Class = CLASS_C;
+                        LoRaMacMibSetRequestConfirm( &mibReq );
+
                         DeviceState = DEVICE_STATE_SEND;
                         NextTx = true;
                     }
@@ -1522,6 +1558,9 @@ int main( void )
                 printf( "\r\n" );
 
                 printf( "\tMcAddr      : %08lX\r\n", McastAddr );
+                printf( "\tMcDFCnt     : %08lX\r\n", McastDFCnt );
+
+
 
                 printf( "\tMcNwkSKey   : " );
                 printf( "%02X", McNwkSKey[0] );

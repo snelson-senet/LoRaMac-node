@@ -113,4 +113,6 @@ uint8_t GetBoardPowerSource( void );
  */
 Version_t BoardGetVersion( void );
 
+int32_t BoardSaveMulticastDFCnt(uint32_t DownLinkCounter);
+
 #endif // __BOARD_H__
